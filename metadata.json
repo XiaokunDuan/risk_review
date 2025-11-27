@@ -1,0 +1,5 @@
+{
+  "name": "risk_review",
+  "description": "A tool to convert GBK encoded CSV files into a specific machine learning dataset format.",
+  "requestFramePermissions": []
+}

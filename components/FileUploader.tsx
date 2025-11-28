@@ -2,7 +2,7 @@ import React, { useRef, useState } from 'react';
 import { Upload, FileType, AlertCircle } from 'lucide-react';
 
 interface FileUploaderProps {
-  onFileSelect: (file: File) => void;
+  onFileSelect: (files: File[]) => void;
   isLoading: boolean;
 }
 
@@ -24,13 +24,27 @@ export const FileUploader: React.FC<FileUploaderProps> = ({ onFileSelect, isLoad
     setIsDragging(false);
     
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      const file = e.dataTransfer.files[0];
-      if (file.type === "text/csv" || file.name.endsWith('.csv')) {
-        onFileSelect(file);
+      const validFiles: File[] = [];
+      // Cast to File[] to handle potential 'unknown' inference
+      const files = Array.from(e.dataTransfer.files) as File[];
+      files.forEach(file => {
+          if (file.name.endsWith('.csv') || file.name.endsWith('.txt') || file.type === "text/csv" || file.type === "text/plain") {
+              validFiles.push(file);
+          }
+      });
+      
+      if (validFiles.length > 0) {
+        onFileSelect(validFiles);
       } else {
-        alert("Please upload a CSV file.");
+        alert("Please upload CSV or TXT files.");
       }
     }
+  };
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (e.target.files && e.target.files.length > 0) {
+          onFileSelect(Array.from(e.target.files));
+      }
   };
 
   return (
@@ -51,9 +65,10 @@ export const FileUploader: React.FC<FileUploaderProps> = ({ onFileSelect, isLoad
       <input 
         type="file" 
         ref={fileInputRef} 
-        onChange={(e) => e.target.files && onFileSelect(e.target.files[0])} 
-        accept=".csv"
+        onChange={handleInputChange}
+        accept=".csv,.txt"
         className="hidden" 
+        multiple
         disabled={isLoading}
       />
       
@@ -63,10 +78,10 @@ export const FileUploader: React.FC<FileUploaderProps> = ({ onFileSelect, isLoad
         </div>
         <div className="space-y-1">
           <p className="text-lg font-medium text-slate-700">
-            {isLoading ? 'Processing...' : 'Click or drag CSV file here'}
+            {isLoading ? 'Processing...' : 'Click or drag files here'}
           </p>
           <p className="text-sm text-slate-500">
-            Supports GBK/Chinese encoding automatically
+            Supports multiple CSV/TXT files (GBK auto-detect)
           </p>
         </div>
       </div>

@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { FileUploader } from './FileUploader';
 import { processRiskCSV } from '../utils/processor';
 import { RiskAnalysisRow } from '../types';
-import { Filter, BarChart3, Search, FileText, X, Copy } from 'lucide-react';
+import { Filter, BarChart3, Search, FileText, X, Copy, Layers } from 'lucide-react';
 
 export const RiskAnalyzer: React.FC = () => {
   const [data, setData] = useState<RiskAnalysisRow[]>([]);
@@ -13,17 +13,35 @@ export const RiskAnalyzer: React.FC = () => {
   // Threshold state
   const [threshold, setThreshold] = useState<number>(0.0001);
 
-  const handleFileSelect = async (file: File) => {
+  const handleFilesSelect = async (files: File[]) => {
     setLoading(true);
     setError(null);
     setData([]);
 
     try {
-      const result = await processRiskCSV(file);
-      setData(result);
+      const promises = files.map(file => processRiskCSV(file));
+      const results = await Promise.all(promises);
+      
+      let combinedData: RiskAnalysisRow[] = [];
+      let globalIdCounter = 0;
+
+      results.forEach((fileRows) => {
+          // Re-index rows to ensure unique IDs across multiple files
+          const reIndexed = fileRows.map(row => ({
+              ...row,
+              id: globalIdCounter++ 
+          }));
+          combinedData = [...combinedData, ...reIndexed];
+      });
+
+      if (combinedData.length === 0) {
+        setError("No valid rows found in the uploaded files. Please check the column names.");
+      } else {
+        setData(combinedData);
+      }
     } catch (err: any) {
       console.error(err);
-      setError(err.message || "Failed to parse analysis file.");
+      setError(err.message || "Failed to parse one or more files.");
     } finally {
       setLoading(false);
     }
@@ -44,7 +62,7 @@ export const RiskAnalyzer: React.FC = () => {
 
     const totalCount = data.length;
     const violationCount = filteredData.length;
-    const violationPercent = ((violationCount / totalCount) * 100).toFixed(2);
+    const violationPercent = totalCount > 0 ? ((violationCount / totalCount) * 100).toFixed(2) : "0.00";
     
     // Deduplicate violations based on content
     const uniqueViolations = new Set(filteredData.map(r => r.content));
@@ -61,7 +79,10 @@ export const RiskAnalyzer: React.FC = () => {
 
     let caseText = "";
     let index = 1;
-    for (const [type, contentSet] of Object.entries(grouped)) {
+    for (const [type, contentSetRaw] of Object.entries(grouped)) {
+      // Explicit cast to fix type inference issue where contentSetRaw might be unknown
+      const contentSet = contentSetRaw as Set<string>;
+      
       // Get up to 5 examples
       const examples = Array.from(contentSet).slice(0, 5).join('、');
       const suffix = contentSet.size > 5 ? '...' : '';
@@ -86,7 +107,7 @@ ${caseText}`;
           <h2 className="text-2xl font-bold text-slate-800">Risk Score Analyzer</h2>
         </div>
         <p className="text-slate-500">
-          Upload the verified CSV to filter results based on '文心安全算子V2-风险得分'.
+          Upload verified CSV files (single or multiple) to filter results based on '文心安全算子V2-风险得分'. Data will be merged.
         </p>
       </div>
 
@@ -94,7 +115,7 @@ ${caseText}`;
         {/* Upload Area */}
         {data.length === 0 && (
           <div>
-             <FileUploader onFileSelect={handleFileSelect} isLoading={loading} />
+             <FileUploader onFileSelect={handleFilesSelect} isLoading={loading} />
              {error && <p className="mt-3 text-red-600 bg-red-50 p-3 rounded-lg text-sm">{error}</p>}
           </div>
         )}
@@ -161,9 +182,13 @@ ${caseText}`;
             {/* Results Table */}
             <div className="border border-slate-200 rounded-xl overflow-hidden shadow-sm">
                <div className="bg-slate-50 px-6 py-3 border-b border-slate-200 flex justify-between items-center">
-                  <h3 className="font-semibold text-slate-700">Filtered Results</h3>
-                  <button onClick={() => setData([])} className="text-xs text-slate-500 hover:text-red-600 font-medium">
-                    Upload New File
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-semibold text-slate-700">Filtered Results</h3>
+                    <span className="text-xs text-slate-400 bg-slate-200 px-2 py-0.5 rounded-full">Total Rows: {data.length}</span>
+                  </div>
+                  <button onClick={() => setData([])} className="flex items-center gap-1 text-xs text-slate-500 hover:text-red-600 font-medium transition-colors">
+                    <Layers className="w-3 h-3" />
+                    Upload New Files
                   </button>
                </div>
                

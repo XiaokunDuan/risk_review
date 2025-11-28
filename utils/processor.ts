@@ -1,5 +1,6 @@
 import Papa from 'papaparse';
-import { ProcessedRow, ProcessingStats, RiskAnalysisRow } from '../types';
+import JSZip from 'jszip';
+import { ProcessedRow, ProcessingStats, RiskAnalysisRow, ProcessedFileResult } from '../types';
 
 export const processCSV = (file: File): Promise<{ data: ProcessedRow[]; stats: ProcessingStats }> => {
   return new Promise((resolve, reject) => {
@@ -156,25 +157,47 @@ export const processRiskCSV = (file: File): Promise<RiskAnalysisRow[]> => {
   });
 };
 
-export const downloadTXT = (data: ProcessedRow[], filename: string) => {
-  // Create tab-separated content
-  // Header: strategy \t content
-  const header = "strategy\tcontent";
-  
-  // Replace tabs and newlines in content to ensure 1 line per record and clean structure
-  const rows = data.map(row => {
-    const safeContent = row.content.replace(/[\t\n\r]+/g, ' '); 
-    return `${row.strategy}\t${safeContent}`;
-  }).join('\n');
-  
-  const fileContent = `${header}\n${rows}`;
+const formatFileContent = (data: ProcessedRow[]) => {
+    const header = "strategy\tcontent";
+    const rows = data.map(row => {
+        const safeContent = row.content.replace(/[\t\n\r]+/g, ' '); 
+        return `${row.strategy}\t${safeContent}`;
+    }).join('\n');
+    return `${header}\n${rows}`;
+};
 
+export const downloadTXT = (data: ProcessedRow[], filename: string) => {
+  const fileContent = formatFileContent(data);
   const blob = new Blob([fileContent], { type: 'text/plain;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.setAttribute('download', filename.replace('.csv', '_processed.txt'));
+  
+  // Clean extension
+  let safeName = filename.replace(/\.(csv|txt)$/i, '');
+  link.setAttribute('download', `${safeName}_processed.txt`);
+  
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
+};
+
+export const downloadZip = async (files: ProcessedFileResult[]) => {
+    const zip = new JSZip();
+    
+    files.forEach(file => {
+        if (file.error || file.data.length === 0) return;
+        const content = formatFileContent(file.data);
+        const safeName = file.originalName.replace(/\.(csv|txt)$/i, '');
+        zip.file(`${safeName}_processed.txt`, content);
+    });
+
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', 'batch_processed_files.zip');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
 };

@@ -9,6 +9,14 @@ export interface ProcessingStats {
   skippedRows: number;
 }
 
+export interface ProcessedFileResult {
+  id: string;
+  originalName: string;
+  data: ProcessedRow[];
+  stats: ProcessingStats;
+  error?: string;
+}
+
 export interface RiskAnalysisRow {
   id: number;
   content: string;

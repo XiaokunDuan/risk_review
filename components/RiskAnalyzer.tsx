@@ -1,15 +1,20 @@
 import React, { useState, useMemo } from 'react';
 import { FileUploader } from './FileUploader';
-import { processRiskCSV } from '../utils/processor';
+import { processRiskCSV, processSourceMapping, downloadRiskData } from '../utils/processor';
 import { RiskAnalysisRow } from '../types';
-import { Filter, BarChart3, Search, FileText, X, Copy, Layers } from 'lucide-react';
+import { Filter, BarChart3, Search, FileText, X, Copy, Layers, CheckSquare, Square, Upload, Database, Download } from 'lucide-react';
 
 export const RiskAnalyzer: React.FC = () => {
   const [data, setData] = useState<RiskAnalysisRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showReport, setShowReport] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   
+  // Source Mapping State
+  const [sourceLoading, setSourceLoading] = useState(false);
+  const [hasSourceData, setHasSourceData] = useState(false);
+
   // Threshold state
   const [threshold, setThreshold] = useState<number>(0.0001);
 
@@ -17,21 +22,21 @@ export const RiskAnalyzer: React.FC = () => {
     setLoading(true);
     setError(null);
     setData([]);
+    setSelectedIds(new Set());
+    setHasSourceData(false);
 
     try {
       const promises = files.map(file => processRiskCSV(file));
       const results = await Promise.all(promises);
       
-      let combinedData: RiskAnalysisRow[] = [];
       let globalIdCounter = 0;
 
-      results.forEach((fileRows) => {
-          // Re-index rows to ensure unique IDs across multiple files
-          const reIndexed = fileRows.map(row => ({
-              ...row,
-              id: globalIdCounter++ 
-          }));
-          combinedData = [...combinedData, ...reIndexed];
+      // FIX: Use flatMap instead of spread operator (...) to avoid "Maximum call stack size exceeded" on large files
+      const combinedData = results.flatMap((fileRows) => {
+        return fileRows.map((row) => ({
+          ...row,
+          id: globalIdCounter++, // Re-index rows to ensure unique IDs across multiple files
+        }));
       });
 
       if (combinedData.length === 0) {
@@ -47,6 +52,38 @@ export const RiskAnalyzer: React.FC = () => {
     }
   };
 
+  const handleSourceFileSelect = async (files: File[]) => {
+      if (files.length === 0) return;
+      const file = files[0]; // Only take first for now, or could loop
+      setSourceLoading(true);
+      setError(null);
+
+      try {
+          const mapping = await processSourceMapping(file);
+          
+          // Update existing data with NIDs
+          setData(prevData => {
+              const updated = prevData.map(row => {
+                  const nid = mapping.get(row.content); // Content is already normalized in processRiskCSV
+                  return nid ? { ...row, nid } : row;
+              });
+              
+              // Check if we actually mapped anything
+              const matchedCount = updated.filter(r => r.nid).length;
+              if (matchedCount > 0) {
+                  setHasSourceData(true);
+              }
+              return updated;
+          });
+
+      } catch (err: any) {
+          console.error(err);
+          setError(`Source File Error: ${err.message}`);
+      } finally {
+          setSourceLoading(false);
+      }
+  };
+
   // Filter logic
   const filteredData = useMemo(() => {
     return data.filter(row => row.riskScore >= threshold).sort((a, b) => b.riskScore - a.riskScore);
@@ -56,31 +93,86 @@ export const RiskAnalyzer: React.FC = () => {
     return data.length > 0 ? Math.max(...data.map(d => d.riskScore)) : 1;
   }, [data]);
 
+  // Selection Logic
+  const toggleSelectRow = (id: number) => {
+    const newSet = new Set(selectedIds);
+    if (newSet.has(id)) {
+      newSet.delete(id);
+    } else {
+      newSet.add(id);
+    }
+    setSelectedIds(newSet);
+  };
+
+  const toggleSelectAll = () => {
+    // If all currently filtered rows are selected, unselect them. Otherwise, select all.
+    const allFilteredSelected = filteredData.length > 0 && filteredData.every(row => selectedIds.has(row.id));
+    
+    if (allFilteredSelected) {
+        setSelectedIds(new Set());
+    } else {
+        const newSet = new Set(filteredData.map(r => r.id));
+        setSelectedIds(newSet);
+    }
+  };
+
+  const isAllSelected = filteredData.length > 0 && filteredData.every(row => selectedIds.has(row.id));
+
+  // Export Logic
+  const handleExport = () => {
+    const targetData = selectedIds.size > 0 
+        ? filteredData.filter(row => selectedIds.has(row.id))
+        : filteredData;
+    
+    if (targetData.length === 0) {
+        alert("No data to export.");
+        return;
+    }
+
+    // Deduplicate by content to ensure unique exports
+    const seenContent = new Set<string>();
+    const uniqueData: RiskAnalysisRow[] = [];
+    
+    targetData.forEach(row => {
+        if (!seenContent.has(row.content)) {
+            seenContent.add(row.content);
+            uniqueData.push(row);
+        }
+    });
+
+    downloadRiskData(uniqueData);
+  };
+
   // Report Generation Logic
   const reportContent = useMemo(() => {
-    if (filteredData.length === 0) return "";
+    // Determine the target dataset: Selection (if active) OR Filtered View (default)
+    const targetData = selectedIds.size > 0 
+        ? filteredData.filter(row => selectedIds.has(row.id))
+        : filteredData;
+
+    if (targetData.length === 0) return "";
 
     const totalCount = data.length;
-    const violationCount = filteredData.length;
+    const violationCount = targetData.length; // Use target data count
     const violationPercent = totalCount > 0 ? ((violationCount / totalCount) * 100).toFixed(2) : "0.00";
     
     // Deduplicate violations based on content
-    const uniqueViolations = new Set(filteredData.map(r => r.content));
+    const uniqueViolations = new Set(targetData.map(r => r.content));
     const uniqueViolationCount = uniqueViolations.size;
 
     // Group by Risk Type
-    const grouped = filteredData.reduce<Record<string, Set<string>>>((acc, row) => {
+    const grouped = targetData.reduce((acc, row) => {
       if (!acc[row.riskType]) {
         acc[row.riskType] = new Set<string>();
       }
       acc[row.riskType].add(row.content);
       return acc;
-    }, {});
+    }, {} as Record<string, Set<string>>);
 
     let caseText = "";
     let index = 1;
     for (const [type, contentSetRaw] of Object.entries(grouped)) {
-      // Explicit cast to fix type inference issue where contentSetRaw might be unknown
+      // Explicit cast to fix type inference issue
       const contentSet = contentSetRaw as Set<string>;
       
       // Get up to 5 examples
@@ -90,12 +182,14 @@ export const RiskAnalyzer: React.FC = () => {
       index++;
     }
 
+    const modeText = selectedIds.size > 0 ? "(Selected Items Only)" : "";
+
     return `样本数量：${totalCount}个
-违规样本：${violationCount}个（${violationPercent}%）
+违规样本：${violationCount}个（${violationPercent}%）${modeText}
 （去重后${uniqueViolationCount}个）
 违规case
 ${caseText}`;
-  }, [data, filteredData]);
+  }, [data, filteredData, selectedIds]);
 
   return (
     <section className="bg-white rounded-3xl shadow-sm border border-slate-200 overflow-hidden">
@@ -107,7 +201,7 @@ ${caseText}`;
           <h2 className="text-2xl font-bold text-slate-800">Risk Score Analyzer</h2>
         </div>
         <p className="text-slate-500">
-          Upload verified CSV files (single or multiple) to filter results based on '文心安全算子V2-风险得分'. Data will be merged.
+          Upload verified CSV files to filter results. Optionally upload Original Source CSV to match NIDs.
         </p>
       </div>
 
@@ -125,58 +219,108 @@ ${caseText}`;
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
             
             {/* Control Panel */}
-            <div className="bg-slate-50 rounded-xl p-6 border border-slate-200 mb-6">
-              <div className="flex flex-col xl:flex-row gap-6 items-center justify-between">
-                
-                {/* Slider Control */}
-                <div className="flex-1 w-full space-y-4">
-                  <div className="flex justify-between items-center">
-                    <label className="text-sm font-semibold text-slate-700 flex items-center gap-2">
-                      <Filter className="w-4 h-4" />
-                      Risk Score Threshold
-                    </label>
-                    <span className="text-xs text-slate-500 bg-white px-2 py-1 rounded border border-slate-200">
-                       Showing scores ≥ {threshold}
-                    </span>
-                  </div>
+            <div className="bg-slate-50 rounded-xl p-6 border border-slate-200 mb-6 space-y-6">
+              
+              {/* Row 1: Source File & Slider */}
+              <div className="flex flex-col xl:flex-row gap-8">
                   
-                  <div className="flex items-center gap-4">
-                    <input
-                      type="range"
-                      min="0"
-                      max={Math.min(maxScore * 1.2, 1)}
-                      step="0.00001"
-                      value={threshold}
-                      onChange={(e) => setThreshold(parseFloat(e.target.value))}
-                      className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
-                    />
-                    <input 
-                      type="number" 
-                      value={threshold}
-                      onChange={(e) => setThreshold(Math.max(0, parseFloat(e.target.value) || 0))}
-                      step="0.00001"
-                      className="w-24 px-3 py-1.5 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
-                    />
+                  {/* Source File Upload (Compact) */}
+                  <div className="flex-none xl:w-1/3 border-b xl:border-b-0 xl:border-r border-slate-200 pb-6 xl:pb-0 xl:pr-8">
+                      <div className="flex justify-between items-center mb-3">
+                        <label className="text-sm font-semibold text-slate-700 flex items-center gap-2">
+                            <Database className="w-4 h-4" />
+                            Original Source File
+                        </label>
+                        {hasSourceData && <span className="text-xs text-green-600 bg-green-50 px-2 py-1 rounded font-medium border border-green-200">NIDs Linked</span>}
+                      </div>
+                      
+                      {!hasSourceData ? (
+                          <div className="relative group cursor-pointer">
+                              <div className="absolute inset-0 bg-blue-50 border border-blue-200 border-dashed rounded-lg opacity-50 group-hover:opacity-100 transition-opacity"></div>
+                              <div className="relative flex items-center justify-center gap-2 py-3">
+                                  <Upload className="w-4 h-4 text-blue-600" />
+                                  <span className="text-sm text-slate-600 font-medium">{sourceLoading ? "Mapping..." : "Upload Original CSV"}</span>
+                              </div>
+                              <input 
+                                type="file" 
+                                onChange={(e) => e.target.files && handleSourceFileSelect(Array.from(e.target.files))}
+                                accept=".csv"
+                                className="absolute inset-0 opacity-0 cursor-pointer"
+                                disabled={sourceLoading}
+                              />
+                          </div>
+                      ) : (
+                          <div className="text-sm text-slate-500 bg-white p-3 border border-slate-200 rounded-lg">
+                              Original file loaded. NIDs are now visible in the table.
+                          </div>
+                      )}
+                      <p className="text-xs text-slate-400 mt-2">Upload the raw source file containing 'NID' to match against content.</p>
                   </div>
-                </div>
 
-                {/* Stats & Actions Widget */}
-                <div className="flex gap-4 min-w-[320px] items-stretch">
-                   <div className="flex-1 bg-white p-3 rounded-lg border border-slate-200 shadow-sm text-center flex flex-col justify-center">
-                      <div className="text-xs text-slate-500 uppercase font-bold tracking-wider">Matches</div>
-                      <div className="text-2xl font-bold text-indigo-600">{filteredData.length}</div>
+                  {/* Slider & Stats */}
+                  <div className="flex-1 space-y-4">
+                     <div className="flex justify-between items-center">
+                        <label className="text-sm font-semibold text-slate-700 flex items-center gap-2">
+                            <Filter className="w-4 h-4" />
+                            Risk Score Threshold
+                        </label>
+                        <span className="text-xs text-slate-500 bg-white px-2 py-1 rounded border border-slate-200">
+                           ≥ {threshold}
+                        </span>
+                     </div>
+                     <div className="flex items-center gap-4">
+                        <input
+                          type="range"
+                          min="0"
+                          max={Math.min(maxScore * 1.2, 1)}
+                          step="0.00001"
+                          value={threshold}
+                          onChange={(e) => setThreshold(parseFloat(e.target.value))}
+                          className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-indigo-600"
+                        />
+                        <input 
+                          type="number" 
+                          value={threshold}
+                          onChange={(e) => setThreshold(Math.max(0, parseFloat(e.target.value) || 0))}
+                          step="0.00001"
+                          className="w-24 px-3 py-1.5 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none"
+                        />
+                     </div>
+                  </div>
+              </div>
+
+              {/* Row 2: Action Buttons */}
+              <div className="flex flex-col sm:flex-row gap-4 pt-2">
+                   <div className="flex-1 bg-white p-3 rounded-lg border border-slate-200 shadow-sm text-center flex items-center justify-between px-6">
+                      <span className="text-xs text-slate-500 uppercase font-bold tracking-wider">
+                          {selectedIds.size > 0 ? 'Selected' : 'Matches'}
+                      </span>
+                      <span className="text-2xl font-bold text-indigo-600">
+                          {selectedIds.size > 0 ? selectedIds.size : filteredData.length}
+                      </span>
                    </div>
                    
-                   <button 
-                    onClick={() => setShowReport(true)}
-                    disabled={filteredData.length === 0}
-                    className="flex-1 flex flex-col items-center justify-center gap-1 bg-indigo-600 hover:bg-indigo-700 text-white p-3 rounded-lg shadow-md shadow-indigo-200 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                   >
-                     <FileText className="w-5 h-5" />
-                     <span className="text-xs font-bold uppercase tracking-wide">Generate Report</span>
-                   </button>
-                </div>
+                   <div className="flex gap-2 flex-1">
+                       <button 
+                        onClick={handleExport}
+                        disabled={filteredData.length === 0}
+                        className="flex-1 flex items-center justify-center gap-2 bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 p-3 rounded-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                       >
+                         <Download className="w-4 h-4" />
+                         <span className="text-sm font-semibold">Export CSV</span>
+                       </button>
+
+                       <button 
+                        onClick={() => setShowReport(true)}
+                        disabled={filteredData.length === 0}
+                        className="flex-1 flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-700 text-white p-3 rounded-lg shadow-md shadow-indigo-200 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                       >
+                         <FileText className="w-4 h-4" />
+                         <span className="text-sm font-semibold">Generate Report</span>
+                       </button>
+                   </div>
               </div>
+
             </div>
 
             {/* Results Table */}
@@ -185,6 +329,14 @@ ${caseText}`;
                   <div className="flex items-center gap-2">
                     <h3 className="font-semibold text-slate-700">Filtered Results</h3>
                     <span className="text-xs text-slate-400 bg-slate-200 px-2 py-0.5 rounded-full">Total Rows: {data.length}</span>
+                    {selectedIds.size > 0 && (
+                        <button 
+                            onClick={() => setSelectedIds(new Set())}
+                            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium ml-2 underline"
+                        >
+                            Clear Selection ({selectedIds.size})
+                        </button>
+                    )}
                   </div>
                   <button onClick={() => setData([])} className="flex items-center gap-1 text-xs text-slate-500 hover:text-red-600 font-medium transition-colors">
                     <Layers className="w-3 h-3" />
@@ -196,6 +348,17 @@ ${caseText}`;
                 <table className="w-full text-sm text-left">
                   <thead className="text-xs text-slate-500 uppercase bg-slate-50 border-b border-slate-200 sticky top-0 z-10">
                     <tr>
+                      <th className="px-4 py-3 bg-slate-50 w-12">
+                         <div className="flex items-center justify-center">
+                            <input 
+                                type="checkbox"
+                                checked={isAllSelected}
+                                onChange={toggleSelectAll}
+                                className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                            />
+                         </div>
+                      </th>
+                      {hasSourceData && <th className="px-6 py-3 font-medium bg-slate-50 text-blue-600">NID</th>}
                       <th className="px-6 py-3 font-medium bg-slate-50">Score</th>
                       <th className="px-6 py-3 font-medium bg-slate-50">Risk Type</th>
                       <th className="px-6 py-3 font-medium bg-slate-50">Content</th>
@@ -204,7 +367,7 @@ ${caseText}`;
                   <tbody className="divide-y divide-slate-100 bg-white">
                     {filteredData.length === 0 ? (
                       <tr>
-                        <td colSpan={3} className="px-6 py-12 text-center text-slate-500">
+                        <td colSpan={hasSourceData ? 5 : 4} className="px-6 py-12 text-center text-slate-500">
                           <div className="flex flex-col items-center gap-2">
                             <Search className="w-8 h-8 opacity-20" />
                             <p>No rows match the current threshold.</p>
@@ -212,26 +375,47 @@ ${caseText}`;
                         </td>
                       </tr>
                     ) : (
-                      filteredData.map((row) => (
-                        <tr key={row.id} className="hover:bg-indigo-50/30 transition-colors">
-                          <td className="px-6 py-4 whitespace-nowrap">
-                            <span className={`
-                              inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border
-                              ${row.riskScore > 0.5 ? 'bg-red-100 text-red-800 border-red-200' : 
-                                row.riskScore > 0.001 ? 'bg-amber-100 text-amber-800 border-amber-200' : 
-                                'bg-green-100 text-green-800 border-green-200'}
-                            `}>
-                              {row.riskScore.toFixed(7)}
-                            </span>
-                          </td>
-                          <td className="px-6 py-4 whitespace-nowrap text-slate-600">
-                            {row.riskType}
-                          </td>
-                          <td className="px-6 py-4 text-slate-700 min-w-[300px]">
-                            {row.content}
-                          </td>
-                        </tr>
-                      ))
+                      filteredData.map((row) => {
+                        const isSelected = selectedIds.has(row.id);
+                        return (
+                            <tr 
+                                key={row.id} 
+                                className={`transition-colors ${isSelected ? 'bg-indigo-50' : 'hover:bg-slate-50'}`}
+                            >
+                              <td className="px-4 py-4 whitespace-nowrap">
+                                <div className="flex items-center justify-center">
+                                    <input 
+                                        type="checkbox"
+                                        checked={isSelected}
+                                        onChange={() => toggleSelectRow(row.id)}
+                                        className="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+                                    />
+                                </div>
+                              </td>
+                              {hasSourceData && (
+                                  <td className="px-6 py-4 whitespace-nowrap font-mono text-xs text-blue-600 font-bold">
+                                      {row.nid || '-'}
+                                  </td>
+                              )}
+                              <td className="px-6 py-4 whitespace-nowrap">
+                                <span className={`
+                                  inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border
+                                  ${row.riskScore > 0.5 ? 'bg-red-100 text-red-800 border-red-200' : 
+                                    row.riskScore > 0.001 ? 'bg-amber-100 text-amber-800 border-amber-200' : 
+                                    'bg-green-100 text-green-800 border-green-200'}
+                                `}>
+                                  {row.riskScore.toFixed(7)}
+                                </span>
+                              </td>
+                              <td className="px-6 py-4 whitespace-nowrap text-slate-600">
+                                {row.riskType}
+                              </td>
+                              <td className="px-6 py-4 text-slate-700 min-w-[300px]">
+                                {row.content}
+                              </td>
+                            </tr>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>

@@ -23,4 +23,5 @@ export interface RiskAnalysisRow {
   riskScore: number;
   riskType: string;
   originalRow: Record<string, string>;
+  nid?: string;
 }

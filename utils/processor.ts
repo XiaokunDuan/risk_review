@@ -2,6 +2,16 @@ import Papa from 'papaparse';
 import JSZip from 'jszip';
 import { ProcessedRow, ProcessingStats, RiskAnalysisRow, ProcessedFileResult } from '../types';
 
+// Helper to normalize content for matching (removes prefix, handles whitespace)
+const normalizeContent = (text: string): string => {
+  if (!text) return '';
+  // 1. Remove specific prefix
+  let clean = text.trim().replace(/^用户评价文本[:：]?\s*/, '');
+  // 2. Normalize whitespace (tabs/newlines -> space)
+  clean = clean.replace(/[\t\n\r]+/g, ' ').trim();
+  return clean;
+};
+
 export const processCSV = (file: File): Promise<{ data: ProcessedRow[]; stats: ProcessingStats }> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -22,6 +32,9 @@ export const processCSV = (file: File): Promise<{ data: ProcessedRow[]; stats: P
             let validCount = 0;
             let skippedCount = 0;
             const fields = results.meta.fields || [];
+            
+            // Set to track duplicates
+            const seenContent = new Set<string>();
 
             // Find the correct column name for content
             const contentKey = fields.find(f => {
@@ -38,14 +51,20 @@ export const processCSV = (file: File): Promise<{ data: ProcessedRow[]; stats: P
               const contentValue = row[contentKey];
               
               if (contentValue) {
-                // Remove specific prefix if present and trim
-                let cleanContent = contentValue.trim().replace(/^用户评价文本[:：]?\s*/, '');
+                const cleanContent = normalizeContent(contentValue);
 
-                processedData.push({
-                  strategy: 'service_safe_cate_v2', // Constant value as requested
-                  content: cleanContent,
-                });
-                validCount++;
+                // 3. Deduplication Check
+                if (cleanContent && !seenContent.has(cleanContent)) {
+                    seenContent.add(cleanContent);
+                    processedData.push({
+                      strategy: 'service_safe_cate_v2', // Constant value as requested
+                      content: cleanContent,
+                    });
+                    validCount++;
+                } else {
+                    // Duplicate or empty after cleaning
+                    skippedCount++;
+                }
               } else {
                 skippedCount++;
               }
@@ -94,7 +113,6 @@ export const processRiskCSV = (file: File): Promise<RiskAnalysisRow[]> => {
         let fields = parseResult.meta.fields || [];
         
         // Check if we found the score column with GBK
-        // Look for "风险得分" or "Risk Score" or similar
         const isColumnFound = (f: string) => f.includes('风险得分') || f.includes('文心安全算子') || f.includes('Risk Score');
         let scoreKey = fields.find(isColumnFound);
 
@@ -136,9 +154,13 @@ export const processRiskCSV = (file: File): Promise<RiskAnalysisRow[]> => {
           const score = parseFloat(scoreRaw);
 
           if (!isNaN(score)) {
+            // Normalize content for potential matching later
+            const rawContent = contentKey ? row[contentKey] : '';
+            const normalizedContent = normalizeContent(rawContent);
+
             riskData.push({
               id: index,
-              content: contentKey ? row[contentKey] : '',
+              content: normalizedContent || rawContent, // Use normalized if possible, else raw
               riskScore: score,
               riskType: typeKey ? row[typeKey] : 'N/A',
               originalRow: row
@@ -157,11 +179,74 @@ export const processRiskCSV = (file: File): Promise<RiskAnalysisRow[]> => {
   });
 };
 
+export const processSourceMapping = (file: File): Promise<Map<string, string>> => {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            try {
+                const buffer = event.target?.result as ArrayBuffer;
+                // Try GBK first as per usual requirement, fallback to UTF-8 handled if key columns missing
+                let decoder = new TextDecoder('gbk');
+                let csvString = decoder.decode(buffer);
+                
+                let parseResult = Papa.parse(csvString, { header: true, skipEmptyLines: true });
+                let fields = parseResult.meta.fields || [];
+                
+                // Check for NID column
+                let nidKey = fields.find(f => f.trim().toUpperCase() === 'NID' || f.includes('业务方id'));
+                
+                if (!nidKey) {
+                    // Try UTF-8 Fallback
+                    decoder = new TextDecoder('utf-8');
+                    csvString = decoder.decode(buffer);
+                    parseResult = Papa.parse(csvString, { header: true, skipEmptyLines: true });
+                    fields = parseResult.meta.fields || [];
+                    nidKey = fields.find(f => f.trim().toUpperCase() === 'NID' || f.includes('业务方id'));
+                }
+
+                if (!nidKey) {
+                    reject(new Error("Could not find 'NID' column in source file."));
+                    return;
+                }
+
+                // Find content column
+                const contentKey = fields.find(f => ['content', '内容'].some(k => f.trim() === k)) || fields.find(f => f.includes('内容'));
+                 if (!contentKey) {
+                    reject(new Error("Could not find 'Content' column in source file."));
+                    return;
+                }
+
+                const mapping = new Map<string, string>();
+                const rows = parseResult.data as Record<string, string>[];
+
+                rows.forEach(row => {
+                    const nid = row[nidKey!];
+                    const content = row[contentKey!];
+                    if (nid && content) {
+                        // Normalize content to match the processed format (remove prefix, etc)
+                        const cleanContent = normalizeContent(content);
+                        if (cleanContent) {
+                            mapping.set(cleanContent, nid);
+                        }
+                    }
+                });
+                
+                console.log(`Mapped ${mapping.size} NIDs from source file.`);
+                resolve(mapping);
+
+            } catch (err) {
+                reject(err);
+            }
+        };
+        reader.onerror = () => reject(new Error("Failed to read source file"));
+        reader.readAsArrayBuffer(file);
+    });
+};
+
 const formatFileContent = (data: ProcessedRow[]) => {
     const header = "strategy\tcontent";
     const rows = data.map(row => {
-        const safeContent = row.content.replace(/[\t\n\r]+/g, ' '); 
-        return `${row.strategy}\t${safeContent}`;
+        return `${row.strategy}\t${row.content}`;
     }).join('\n');
     return `${header}\n${rows}`;
 };
@@ -173,7 +258,6 @@ export const downloadTXT = (data: ProcessedRow[], filename: string) => {
   const link = document.createElement('a');
   link.href = url;
   
-  // Clean extension
   let safeName = filename.replace(/\.(csv|txt)$/i, '');
   link.setAttribute('download', `${safeName}_processed.txt`);
   
@@ -197,6 +281,26 @@ export const downloadZip = async (files: ProcessedFileResult[]) => {
     const link = document.createElement('a');
     link.href = url;
     link.setAttribute('download', 'batch_processed_files.zip');
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+};
+
+export const downloadRiskData = (data: RiskAnalysisRow[]) => {
+    // Add BOM for Excel utf-8 compatibility
+    const BOM = "\uFEFF";
+    const header = "nid,risk_score,risk_type,content";
+    const csvContent = data.map(row => {
+        // Escape quotes in content
+        const safeContent = row.content.replace(/"/g, '""');
+        return `${row.nid || ''},${row.riskScore},${row.riskType},"${safeContent}"`;
+    }).join('\n');
+
+    const blob = new Blob([BOM + header + '\n' + csvContent], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', 'risk_analysis_export.csv');
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
